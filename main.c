@@ -20,7 +20,6 @@ enum {
     CONTROL_SPEED_DOWN         = 0x06,
     CONTROL_OFF                = 0x07,
 
-    MIN_HOLD_MS                = 115,
     SETTLE_ON_HIGH_TIMEOUT_MS  = 100,
     MIN_ACTIVE_BEFORE_SLEEP_MS = 1000,
 };
@@ -69,15 +68,16 @@ static void powerdown(void)
     sleep(SLEEP_MODE_PWR_DOWN);
 }
 
-void settle_on_high(void)
+void settle_on_high(volatile uint8_t *port, uint8_t mask)
 {
     long t = 0, t0 = 0;
 
-    loop_until_bit_is_set(PIND, PD2);
+    loop_until_bit_is_set(port, mask);
     t0 = millis();
 
+    // wait for pin to stay high for x milliseconds
     while ((t = millis()) - t0 < SETTLE_ON_HIGH_TIMEOUT_MS) {
-	if (bit_is_clear(PIND, PD2))
+	if (bit_is_clear(port, mask))
 	    t0 = millis();
     }
 }
@@ -85,7 +85,7 @@ void settle_on_high(void)
 static void setup(void)
 {
     DDRB = 0x0f;
-    PORTB = ~0x0f; // enable pull-up on used pins
+    PORTB = 0xe0; // enable pull-up on used pins PB7, 6, 5
 }
 
 static void standby(State *state)
@@ -100,7 +100,7 @@ static void standby(State *state)
     }
 
     // wait until there is no more activity from the remote control
-    settle_on_high();
+    settle_on_high(&PIND, PD2);
     PORTB = 0;
 
     enable_int0();
@@ -114,6 +114,8 @@ static void standby(State *state)
 
 static void irinterpret(State *state, const decode_results *r)
 {
+    state->code = 0;
+
     if (r->decode_type == RC5) {
 	state->toggle = (r->value & 0x800) != 0;
 
@@ -133,16 +135,6 @@ static void irinterpret(State *state, const decode_results *r)
 	    state->code = CONTROL_TOGGLE_SPEED;
 	    break;
 
-	case CHANNEL_UP:
-	    // faster
-	    state->code = CONTROL_SPEED_UP;
-	    break;
-
-	case CHANNEL_DOWN:
-	    // slower
-	    state->code = CONTROL_SPEED_DOWN;
-	    break;
-
 	case VOLUME_UP:
 	    // brighter
 	    state->code = CONTROL_BRIGHTNESS_UP;
@@ -152,37 +144,50 @@ static void irinterpret(State *state, const decode_results *r)
 	    // dimmer
 	    state->code = CONTROL_BRIGHTNESS_DOWN;
 	    break;
+
+	case CHANNEL_UP:
+	    // faster
+	    state->code = CONTROL_SPEED_UP;
+	    break;
+
+	case CHANNEL_DOWN:
+	    // slower
+	    state->code = CONTROL_SPEED_DOWN;
+	    break;
 	}
 
 	state->code |= (state->toggle << 3);
     }
 }
 
+void portout(State *state)
+{
+    if (state->code != 0) {
+	loop_until_bit_is_set(PINB, PB4);
+
+	PORTB |= (state->code & 0x0f);
+
+	loop_until_bit_is_clear(PINB, PB4);
+
+	PORTB &= 0xe0;
+
+	state->code = 0;
+	irrecv_resume();
+    }
+}
+
 int main(void)
 {
-    unsigned long t0 = 0, t = 0;;
-
-    setup_timer0();
     setup_irrecv();
     setup_int0();
     setup();
 
-    t0 = millis();
-
     for (;;) {
 	if (irrecv_decode(&irresults)) {
 	    irinterpret(&state, &irresults);
-	    if (state.code != 0) {
-		PORTB = state.code & 0x0f;
-		if ((state.code & 0x07) == CONTROL_OFF)
-		    standby(&state);
-	    }
 	    irrecv_resume();
-	    t0 = millis();
-	} else if ((t = millis()) - t0 > MIN_HOLD_MS) {
- 	    t0 = t;
-	    PORTB = 0;
 	}
+	portout(&state);
     }
 
     return 0;
