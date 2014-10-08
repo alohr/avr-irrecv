@@ -20,7 +20,6 @@ OBJECTS    = main.o irrecv.o timer0.o
 
 AVRDUDE = avrdude $(PROGRAMMER) -p $(DEVICE)
 COMPILE = avr-gcc -std=gnu99 -Wall -Os -DF_CPU=$(CLOCK) -mmcu=$(DEVICE)
-VPATH   = $(IRREMOTE)
 
 # symbolic targets:
 all:	main.hex

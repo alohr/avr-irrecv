@@ -20,7 +20,10 @@ enum {
     CONTROL_SPEED_DOWN         = 0x06,
     CONTROL_OFF                = 0x07,
 
-    SETTLE_ON_HIGH_TIMEOUT_MS  = 100,
+    CONTROL_DATA_MASK          = 0x07,
+    CONTROL_TOGGLE_MASK        = 0x80,
+
+    SETTLE_ON_HIGH_TIMEOUT_MS  = 2000,
     MIN_ACTIVE_BEFORE_SLEEP_MS = 1000,
 };
 
@@ -28,10 +31,11 @@ typedef struct {
     unsigned long twakeup;
     int toggle;
     int code;
+    int sleep;
 } State;
 
-decode_results irresults;
-State state;
+static decode_results irresults;
+static State state;
 
 static void setup_int0(void)
 {
@@ -68,16 +72,16 @@ static void powerdown(void)
     sleep(SLEEP_MODE_PWR_DOWN);
 }
 
-void settle_on_high(volatile uint8_t *port, uint8_t mask)
+static void settle_on_high(volatile uint8_t *port, uint8_t mask)
 {
     long t = 0, t0 = 0;
 
-    loop_until_bit_is_set(port, mask);
+    loop_until_bit_is_set(*port, mask);
     t0 = millis();
 
-    // wait for pin to stay high for x milliseconds
+    // now wait for pin to stay high for x milliseconds
     while ((t = millis()) - t0 < SETTLE_ON_HIGH_TIMEOUT_MS) {
-	if (bit_is_clear(port, mask))
+	if (bit_is_clear(*port, mask))
 	    t0 = millis();
     }
 }
@@ -90,26 +94,17 @@ static void setup(void)
 
 static void standby(State *state)
 {
-    PORTB = 0;
-    for (int i = 0; i < 3; i++) {
-	for (int j = 0; j < 4; j++) {
-	    PORTB |= _BV(j);
-	    _delay_ms(100);
-	    PORTB &= ~_BV(j);
-	}
-    }
-
     // wait until there is no more activity from the remote control
     settle_on_high(&PIND, PD2);
-    PORTB = 0;
 
     enable_int0();
-    sei();
     powerdown();
     disable_int0();
 
     state->twakeup = millis();
+    state->sleep = 0;
     state->code = 0;
+    irrecv_resume();
 }
 
 static void irinterpret(State *state, const decode_results *r)
@@ -160,17 +155,19 @@ static void irinterpret(State *state, const decode_results *r)
     }
 }
 
-void portout(State *state)
+static void portout(State *state)
 {
     if (state->code != 0) {
 	loop_until_bit_is_set(PINB, PB4);
 
 	PORTB |= (state->code & 0x0f);
 
+	// wait for ack
 	loop_until_bit_is_clear(PINB, PB4);
 
 	PORTB &= 0xe0;
 
+	state->sleep = (state->code & CONTROL_DATA_MASK) == CONTROL_OFF;
 	state->code = 0;
 	irrecv_resume();
     }
@@ -178,6 +175,7 @@ void portout(State *state)
 
 int main(void)
 {
+    setup_timer0();
     setup_irrecv();
     setup_int0();
     setup();
@@ -188,6 +186,9 @@ int main(void)
 	    irrecv_resume();
 	}
 	portout(&state);
+	if (state.sleep) {
+	    standby(&state);
+	}
     }
 
     return 0;
